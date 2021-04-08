@@ -46,7 +46,7 @@ class PassThroughSuite extends SparkFunSuite {
 
       val builder = TestCompressibleColumnBuilder(columnStats, columnType, PassThrough)
 
-      input.map { value =>
+      input.foreach { value =>
         val row = new GenericInternalRow(1)
         columnType.setField(row, 0, value)
         builder.appendFrom(row, 0)
@@ -98,7 +98,7 @@ class PassThroughSuite extends SparkFunSuite {
       val row = new GenericInternalRow(1)
       val nullRow = new GenericInternalRow(1)
       nullRow.setNullAt(0)
-      input.map { value =>
+      input.foreach { value =>
         if (value == nullValue) {
           builder.appendFrom(nullRow, 0)
         } else {
@@ -160,8 +160,7 @@ class PassThroughSuite extends SparkFunSuite {
     }
 
     test(s"$PassThrough with $typeName: long random series") {
-      val input = Array.fill[Any](10000)(makeRandomValue(columnType))
-      skeleton(input.map(_.asInstanceOf[T#InternalType]))
+      skeleton(Seq.fill[T#InternalType](10000)(makeRandomValue(columnType)))
     }
 
     test(s"$PassThrough with $typeName: empty column for decompress()") {
@@ -169,8 +168,7 @@ class PassThroughSuite extends SparkFunSuite {
     }
 
     test(s"$PassThrough with $typeName: long random series for decompress()") {
-      val input = Array.fill[Any](10000)(makeRandomValue(columnType))
-      skeletonForDecompress(input.map(_.asInstanceOf[T#InternalType]))
+      skeletonForDecompress(Seq.fill[T#InternalType](10000)(makeRandomValue(columnType)))
     }
 
     test(s"$PassThrough with $typeName: simple case with null for decompress()") {

@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import java.time.LocalDate
-
 import scala.collection.mutable
 
 import org.apache.spark.sql.catalyst.expressions._
@@ -52,6 +50,21 @@ object ReplaceExpressions extends Rule[LogicalPlan] {
   }
 }
 
+/**
+ * Rewrite non correlated exists subquery to use ScalarSubquery
+ *   WHERE EXISTS (SELECT A FROM TABLE B WHERE COL1 > 10)
+ * will be rewritten to
+ *   WHERE (SELECT 1 FROM (SELECT A FROM TABLE B WHERE COL1 > 10) LIMIT 1) IS NOT NULL
+ */
+object RewriteNonCorrelatedExists extends Rule[LogicalPlan] {
+  override def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+    case exists: Exists if exists.children.isEmpty =>
+      IsNotNull(
+        ScalarSubquery(
+          plan = Limit(Literal(1), Project(Seq(Alias(Literal(1), "col")()), exists.plan)),
+          exprId = exists.exprId))
+  }
+}
 
 /**
  * Computes the current date and time to make sure we return the same result in a single query.
@@ -62,29 +75,37 @@ object ComputeCurrentTime extends Rule[LogicalPlan] {
     val timeExpr = CurrentTimestamp()
     val timestamp = timeExpr.eval(EmptyRow).asInstanceOf[Long]
     val currentTime = Literal.create(timestamp, timeExpr.dataType)
+    val timezone = Literal.create(conf.sessionLocalTimeZone, StringType)
 
     plan transformAllExpressions {
-      case CurrentDate(Some(timeZoneId)) =>
+      case currentDate @ CurrentDate(Some(timeZoneId)) =>
         currentDates.getOrElseUpdate(timeZoneId, {
           Literal.create(
-            LocalDate.now(DateTimeUtils.getZoneId(timeZoneId)),
+            DateTimeUtils.microsToDays(timestamp, currentDate.zoneId),
             DateType)
         })
-      case CurrentTimestamp() => currentTime
+      case CurrentTimestamp() | Now() => currentTime
+      case CurrentTimeZone() => timezone
     }
   }
 }
 
 
-/** Replaces the expression of CurrentDatabase with the current database name. */
-case class GetCurrentDatabase(catalogManager: CatalogManager) extends Rule[LogicalPlan] {
+/**
+ * Replaces the expression of CurrentDatabase with the current database name.
+ * Replaces the expression of CurrentCatalog with the current catalog name.
+ */
+case class GetCurrentDatabaseAndCatalog(catalogManager: CatalogManager) extends Rule[LogicalPlan] {
   def apply(plan: LogicalPlan): LogicalPlan = {
     import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
     val currentNamespace = catalogManager.currentNamespace.quoted
+    val currentCatalog = catalogManager.currentCatalog.name()
 
     plan transformAllExpressions {
       case CurrentDatabase() =>
         Literal.create(currentNamespace, StringType)
+      case CurrentCatalog() =>
+        Literal.create(currentCatalog, StringType)
     }
   }
 }

@@ -20,23 +20,34 @@ license: |
 ---
 
 ### Description
-`LIST FILE` lists the files added by [ADD FILE](sql-ref-syntax-aux-resource-mgmt-add-file.html).
+
+`LIST FILE` lists the resources added by [ADD FILE](sql-ref-syntax-aux-resource-mgmt-add-file.html).
 
 ### Syntax
-{% highlight sql %}
-LIST FILE
-{% endhighlight %}
+
+```sql
+LIST { FILE | FILES } file_name [ ... ]
+```
 
 ### Examples
-{% highlight sql %}
+
+```sql
 ADD FILE /tmp/test;
+ADD FILE /tmp/test_2;
 LIST FILE;
 -- output for LIST FILE
 file:/private/tmp/test
-{% endhighlight %}
+file:/private/tmp/test_2
+
+LIST FILE /tmp/test /some/random/file /another/random/file
+--output
+file:/private/tmp/test
+```
 
 ### Related Statements
- * [ADD FILE](sql-ref-syntax-aux-resource-mgmt-add-file.html)
- * [ADD JAR](sql-ref-syntax-aux-resource-mgmt-add-jar.html)
- * [LIST JAR](sql-ref-syntax-aux-resource-mgmt-list-jar.html)
 
+* [ADD FILE](sql-ref-syntax-aux-resource-mgmt-add-file.html)
+* [ADD JAR](sql-ref-syntax-aux-resource-mgmt-add-jar.html)
+* [ADD ARCHIVE](sql-ref-syntax-aux-resource-mgmt-add-archive.html)
+* [LIST JAR](sql-ref-syntax-aux-resource-mgmt-list-jar.html)
+* [LIST ARCHIVE](sql-ref-syntax-aux-resource-mgmt-list-archive.html)

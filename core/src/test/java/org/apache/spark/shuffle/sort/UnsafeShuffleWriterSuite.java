@@ -30,7 +30,6 @@ import scala.Tuple2$;
 import scala.collection.Iterator;
 
 import com.google.common.collect.HashMultiset;
-import com.google.common.collect.Iterators;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -69,10 +68,10 @@ import static org.mockito.Mockito.*;
 public class UnsafeShuffleWriterSuite {
 
   static final int DEFAULT_INITIAL_SORT_BUFFER_SIZE = 4096;
-  static final int NUM_PARTITITONS = 4;
+  static final int NUM_PARTITIONS = 4;
   TestMemoryManager memoryManager;
   TaskMemoryManager taskMemoryManager;
-  final HashPartitioner hashPartitioner = new HashPartitioner(NUM_PARTITITONS);
+  final HashPartitioner hashPartitioner = new HashPartitioner(NUM_PARTITIONS);
   File mergedOutputFile;
   File tempDir;
   long[] partitionSizesInMergedFile;
@@ -98,8 +97,8 @@ public class UnsafeShuffleWriterSuite {
 
   @Before
   @SuppressWarnings("unchecked")
-  public void setUp() throws IOException {
-    MockitoAnnotations.initMocks(this);
+  public void setUp() throws Exception {
+    MockitoAnnotations.openMocks(this).close();
     tempDir = Utils.createTempDir(null, "test");
     mergedOutputFile = File.createTempFile("mergedoutput", "", tempDir);
     partitionSizesInMergedFile = null;
@@ -195,7 +194,7 @@ public class UnsafeShuffleWriterSuite {
   private List<Tuple2<Object, Object>> readRecordsFromFile() throws IOException {
     final ArrayList<Tuple2<Object, Object>> recordsList = new ArrayList<>();
     long startOffset = 0;
-    for (int i = 0; i < NUM_PARTITITONS; i++) {
+    for (int i = 0; i < NUM_PARTITIONS; i++) {
       final long partitionSize = partitionSizesInMergedFile[i];
       if (partitionSize > 0) {
         FileInputStream fin = new FileInputStream(mergedOutputFile);
@@ -249,12 +248,12 @@ public class UnsafeShuffleWriterSuite {
   @Test
   public void writeEmptyIterator() throws Exception {
     final UnsafeShuffleWriter<Object, Object> writer = createWriter(true);
-    writer.write(Iterators.emptyIterator());
+    writer.write(new ArrayList<Product2<Object, Object>>().iterator());
     final Option<MapStatus> mapStatus = writer.stop(true);
     assertTrue(mapStatus.isDefined());
     assertTrue(mergedOutputFile.exists());
     assertEquals(0, spillFilesCreated.size());
-    assertArrayEquals(new long[NUM_PARTITITONS], partitionSizesInMergedFile);
+    assertArrayEquals(new long[NUM_PARTITIONS], partitionSizesInMergedFile);
     assertEquals(0, taskMetrics.shuffleWriteMetrics().recordsWritten());
     assertEquals(0, taskMetrics.shuffleWriteMetrics().bytesWritten());
     assertEquals(0, taskMetrics.diskBytesSpilled());
@@ -265,7 +264,7 @@ public class UnsafeShuffleWriterSuite {
   public void writeWithoutSpilling() throws Exception {
     // In this example, each partition should have exactly one record:
     final ArrayList<Product2<Object, Object>> dataToWrite = new ArrayList<>();
-    for (int i = 0; i < NUM_PARTITITONS; i++) {
+    for (int i = 0; i < NUM_PARTITIONS; i++) {
       dataToWrite.add(new Tuple2<>(i, i));
     }
     final UnsafeShuffleWriter<Object, Object> writer = createWriter(true);

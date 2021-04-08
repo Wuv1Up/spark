@@ -249,6 +249,13 @@ class DecisionTreeClassifierSuite extends MLTest with DefaultReadWriteTest {
 
     val newData: DataFrame = TreeTests.setMetadata(rdd, categoricalFeatures, numClasses)
     val newTree = dt.fit(newData)
+    newTree.setLeafCol("predictedLeafId")
+
+    val transformed = newTree.transform(newData)
+    checkNominalOnDF(transformed, "prediction", newTree.numClasses)
+    checkNominalOnDF(transformed, "predictedLeafId", newTree.numLeave)
+    checkVectorSizeOnDF(transformed, "rawPrediction", newTree.numClasses)
+    checkVectorSizeOnDF(transformed, "probability", newTree.numClasses)
 
     MLTestingUtils.checkCopyAndUids(dt, newTree)
 
@@ -279,6 +286,8 @@ class DecisionTreeClassifierSuite extends MLTest with DefaultReadWriteTest {
     val newTree = dt.fit(newData)
 
     testPredictionModelSinglePrediction(newTree, newData)
+    testClassificationModelSingleRawPrediction(newTree, newData)
+    testProbClassificationModelSingleProbPrediction(newTree, newData)
   }
 
   test("training with 1-category categorical feature") {
@@ -436,6 +445,18 @@ class DecisionTreeClassifierSuite extends MLTest with DefaultReadWriteTest {
     val model = dt.fit(data)
 
     testDefaultReadWrite(model)
+  }
+
+  test("SPARK-33398: Load DecisionTreeClassificationModel prior to Spark 3.0") {
+    val path = testFile("ml-models/dtc-2.4.7")
+    val model = DecisionTreeClassificationModel.load(path)
+    assert(model.numClasses === 2)
+    assert(model.numFeatures === 692)
+    assert(model.numNodes === 5)
+
+    val metadata = spark.read.json(s"$path/metadata")
+    val sparkVersionStr = metadata.select("sparkVersion").first().getString(0)
+    assert(sparkVersionStr === "2.4.7")
   }
 }
 

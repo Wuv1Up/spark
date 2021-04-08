@@ -18,60 +18,56 @@
 package org.apache.spark.sql.connector.write;
 
 import org.apache.spark.annotation.Evolving;
-import org.apache.spark.sql.connector.catalog.Table;
-import org.apache.spark.sql.connector.catalog.TableCapability;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
-import org.apache.spark.sql.types.StructType;
 
 /**
- * An interface for building the {@link BatchWrite}. Implementations can mix in some interfaces to
+ * An interface for building the {@link Write}. Implementations can mix in some interfaces to
  * support different ways to write data to data sources.
- *
- * Unless modified by a mixin interface, the {@link BatchWrite} configured by this builder is to
+ * <p>
+ * Unless modified by a mixin interface, the {@link Write} configured by this builder is to
  * append data without affecting existing data.
+ *
+ * @since 3.0.0
  */
 @Evolving
 public interface WriteBuilder {
 
   /**
-   * Passes the `queryId` from Spark to data source. `queryId` is a unique string of the query. It's
-   * possible that there are many queries running at the same time, or a query is restarted and
-   * resumed. {@link BatchWrite} can use this id to identify the query.
+   * Returns a logical {@link Write} shared between batch and streaming.
    *
-   * @return a new builder with the `queryId`. By default it returns `this`, which means the given
-   *         `queryId` is ignored. Please override this method to take the `queryId`.
+   * @since 3.2.0
    */
-  default WriteBuilder withQueryId(String queryId) {
-    return this;
+  default Write build() {
+    return new Write() {
+      @Override
+      public BatchWrite toBatch() {
+        return buildForBatch();
+      }
+
+      @Override
+      public StreamingWrite toStreaming() {
+        return buildForStreaming();
+      }
+    };
   }
 
   /**
-   * Passes the schema of the input data from Spark to data source.
+   * Returns a {@link BatchWrite} to write data to batch source.
    *
-   * @return a new builder with the `schema`. By default it returns `this`, which means the given
-   *         `schema` is ignored. Please override this method to take the `schema`.
+   * @deprecated use {@link #build()} instead.
    */
-  default WriteBuilder withInputDataSchema(StructType schema) {
-    return this;
-  }
-
-  /**
-   * Returns a {@link BatchWrite} to write data to batch source. By default this method throws
-   * exception, data sources must overwrite this method to provide an implementation, if the
-   * {@link Table} that creates this write returns {@link TableCapability#BATCH_WRITE} support in
-   * its {@link Table#capabilities()}.
-   */
+  @Deprecated
   default BatchWrite buildForBatch() {
     throw new UnsupportedOperationException(getClass().getName() +
       " does not support batch write");
   }
 
   /**
-   * Returns a {@link StreamingWrite} to write data to streaming source. By default this method
-   * throws exception, data sources must overwrite this method to provide an implementation, if the
-   * {@link Table} that creates this write returns {@link TableCapability#STREAMING_WRITE} support
-   * in its {@link Table#capabilities()}.
+   * Returns a {@link StreamingWrite} to write data to streaming source.
+   *
+   * @deprecated use {@link #build()} instead.
    */
+  @Deprecated
   default StreamingWrite buildForStreaming() {
     throw new UnsupportedOperationException(getClass().getName() +
       " does not support streaming write");

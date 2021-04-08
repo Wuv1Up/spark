@@ -17,13 +17,15 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
+import java.math.RoundingMode
 import java.util.Locale
 
-import scala.util.control.NonFatal
+import com.google.common.math.{DoubleMath, IntMath, LongMath}
 
-import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
+import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, CodeGenerator, ExprCode}
 import org.apache.spark.sql.catalyst.util.IntervalUtils
 import org.apache.spark.sql.catalyst.util.IntervalUtils._
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.CalendarInterval
 
@@ -32,7 +34,7 @@ abstract class ExtractIntervalPart(
     val dataType: DataType,
     func: CalendarInterval => Any,
     funcName: String)
-  extends UnaryExpression with ExpectsInputTypes with Serializable {
+  extends UnaryExpression with ExpectsInputTypes with NullIntolerant with Serializable {
 
   override def inputTypes: Seq[AbstractDataType] = Seq(CalendarIntervalType)
 
@@ -46,20 +48,8 @@ abstract class ExtractIntervalPart(
   }
 }
 
-case class ExtractIntervalMillenniums(child: Expression)
-  extends ExtractIntervalPart(child, IntegerType, getMillenniums, "getMillenniums")
-
-case class ExtractIntervalCenturies(child: Expression)
-  extends ExtractIntervalPart(child, IntegerType, getCenturies, "getCenturies")
-
-case class ExtractIntervalDecades(child: Expression)
-  extends ExtractIntervalPart(child, IntegerType, getDecades, "getDecades")
-
 case class ExtractIntervalYears(child: Expression)
   extends ExtractIntervalPart(child, IntegerType, getYears, "getYears")
-
-case class ExtractIntervalQuarters(child: Expression)
-  extends ExtractIntervalPart(child, ByteType, getQuarters, "getQuarters")
 
 case class ExtractIntervalMonths(child: Expression)
   extends ExtractIntervalPart(child, ByteType, getMonths, "getMonths")
@@ -76,50 +66,31 @@ case class ExtractIntervalMinutes(child: Expression)
 case class ExtractIntervalSeconds(child: Expression)
   extends ExtractIntervalPart(child, DecimalType(8, 6), getSeconds, "getSeconds")
 
-case class ExtractIntervalMilliseconds(child: Expression)
-  extends ExtractIntervalPart(child, DecimalType(8, 3), getMilliseconds, "getMilliseconds")
-
-case class ExtractIntervalMicroseconds(child: Expression)
-  extends ExtractIntervalPart(child, LongType, getMicroseconds, "getMicroseconds")
-
-// Number of seconds in 10000 years is 315576000001 (30 days per one month)
-// which is 12 digits + 6 digits for the fractional part of seconds.
-case class ExtractIntervalEpoch(child: Expression)
-  extends ExtractIntervalPart(child, DecimalType(18, 6), getEpoch, "getEpoch")
-
 object ExtractIntervalPart {
 
   def parseExtractField(
       extractField: String,
       source: Expression,
       errorHandleFunc: => Nothing): Expression = extractField.toUpperCase(Locale.ROOT) match {
-    case "MILLENNIUM" | "MILLENNIA" | "MIL" | "MILS" => ExtractIntervalMillenniums(source)
-    case "CENTURY" | "CENTURIES" | "C" | "CENT" => ExtractIntervalCenturies(source)
-    case "DECADE" | "DECADES" | "DEC" | "DECS" => ExtractIntervalDecades(source)
     case "YEAR" | "Y" | "YEARS" | "YR" | "YRS" => ExtractIntervalYears(source)
-    case "QUARTER" | "QTR" => ExtractIntervalQuarters(source)
     case "MONTH" | "MON" | "MONS" | "MONTHS" => ExtractIntervalMonths(source)
     case "DAY" | "D" | "DAYS" => ExtractIntervalDays(source)
     case "HOUR" | "H" | "HOURS" | "HR" | "HRS" => ExtractIntervalHours(source)
     case "MINUTE" | "M" | "MIN" | "MINS" | "MINUTES" => ExtractIntervalMinutes(source)
     case "SECOND" | "S" | "SEC" | "SECONDS" | "SECS" => ExtractIntervalSeconds(source)
-    case "MILLISECONDS" | "MSEC" | "MSECS" | "MILLISECON" | "MSECONDS" | "MS" =>
-      ExtractIntervalMilliseconds(source)
-    case "MICROSECONDS" | "USEC" | "USECS" | "USECONDS" | "MICROSECON" | "US" =>
-      ExtractIntervalMicroseconds(source)
-    case "EPOCH" => ExtractIntervalEpoch(source)
     case _ => errorHandleFunc
   }
 }
 
 abstract class IntervalNumOperation(
     interval: Expression,
-    num: Expression,
-    operation: (CalendarInterval, Double) => CalendarInterval,
-    operationName: String)
-  extends BinaryExpression with ImplicitCastInputTypes with Serializable {
+    num: Expression)
+  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
   override def left: Expression = interval
   override def right: Expression = num
+
+  protected val operation: (CalendarInterval, Double) => CalendarInterval
+  protected def operationName: String
 
   override def inputTypes: Seq[AbstractDataType] = Seq(CalendarIntervalType, DoubleType)
   override def dataType: DataType = CalendarIntervalType
@@ -127,34 +98,40 @@ abstract class IntervalNumOperation(
   override def nullable: Boolean = true
 
   override def nullSafeEval(interval: Any, num: Any): Any = {
-    try {
-      operation(interval.asInstanceOf[CalendarInterval], num.asInstanceOf[Double])
-    } catch {
-      case _: java.lang.ArithmeticException => null
-    }
+    operation(interval.asInstanceOf[CalendarInterval], num.asInstanceOf[Double])
   }
 
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    nullSafeCodeGen(ctx, ev, (interval, num) => {
-      val iu = IntervalUtils.getClass.getName.stripSuffix("$")
-      s"""
-        try {
-          ${ev.value} = $iu.$operationName($interval, $num);
-        } catch (java.lang.ArithmeticException e) {
-          ${ev.isNull} = true;
-        }
-      """
-    })
+    val iu = IntervalUtils.getClass.getName.stripSuffix("$")
+    defineCodeGen(ctx, ev, (interval, num) => s"$iu.$operationName($interval, $num)")
   }
 
-  override def prettyName: String = operationName + "_interval"
+  override def prettyName: String = operationName.stripSuffix("Exact") + "_interval"
 }
 
-case class MultiplyInterval(interval: Expression, num: Expression)
-  extends IntervalNumOperation(interval, num, multiply, "multiply")
+case class MultiplyInterval(
+    interval: Expression,
+    num: Expression,
+    failOnError: Boolean = SQLConf.get.ansiEnabled)
+  extends IntervalNumOperation(interval, num) {
 
-case class DivideInterval(interval: Expression, num: Expression)
-  extends IntervalNumOperation(interval, num, divide, "divide")
+  override protected val operation: (CalendarInterval, Double) => CalendarInterval =
+    if (failOnError) multiplyExact else multiply
+
+  override protected def operationName: String = if (failOnError) "multiplyExact" else "multiply"
+}
+
+case class DivideInterval(
+    interval: Expression,
+    num: Expression,
+    failOnError: Boolean = SQLConf.get.ansiEnabled)
+  extends IntervalNumOperation(interval, num) {
+
+  override protected val operation: (CalendarInterval, Double) => CalendarInterval =
+    if (failOnError) divideExact else divide
+
+  override protected def operationName: String = if (failOnError) "divideExact" else "divide"
+}
 
 // scalastyle:off line.size.limit
 @ExpressionDescription(
@@ -175,8 +152,11 @@ case class DivideInterval(interval: Expression, num: Expression)
        100 years 11 months 8 days 12 hours 30 minutes 1.001001 seconds
       > SELECT _FUNC_(100, null, 3);
        NULL
+      > SELECT _FUNC_(0, 1, 0, 1, 0, 0, 100.000001);
+       1 months 1 days 1 minutes 40.000001 seconds
   """,
-  since = "3.0.0")
+  since = "3.0.0",
+  group = "datetime_funcs")
 // scalastyle:on line.size.limit
 case class MakeInterval(
     years: Expression,
@@ -185,8 +165,9 @@ case class MakeInterval(
     days: Expression,
     hours: Expression,
     mins: Expression,
-    secs: Expression)
-  extends SeptenaryExpression with ImplicitCastInputTypes {
+    secs: Expression,
+    failOnError: Boolean = SQLConf.get.ansiEnabled)
+  extends SeptenaryExpression with ImplicitCastInputTypes with NullIntolerant {
 
   def this(
       years: Expression,
@@ -194,8 +175,19 @@ case class MakeInterval(
       weeks: Expression,
       days: Expression,
       hours: Expression,
+      mins: Expression,
+      sec: Expression) = {
+    this(years, months, weeks, days, hours, mins, sec, SQLConf.get.ansiEnabled)
+  }
+  def this(
+      years: Expression,
+      months: Expression,
+      weeks: Expression,
+      days: Expression,
+      hours: Expression,
       mins: Expression) = {
-    this(years, months, weeks, days, hours, mins, Literal(Decimal(0, 8, 6)))
+    this(years, months, weeks, days, hours, mins, Literal(Decimal(0, Decimal.MAX_LONG_DIGITS, 6)),
+      SQLConf.get.ansiEnabled)
   }
   def this(
       years: Expression,
@@ -217,9 +209,9 @@ case class MakeInterval(
   // Accept `secs` as DecimalType to avoid loosing precision of microseconds while converting
   // them to the fractional part of `secs`.
   override def inputTypes: Seq[AbstractDataType] = Seq(IntegerType, IntegerType, IntegerType,
-    IntegerType, IntegerType, IntegerType, DecimalType(8, 6))
+    IntegerType, IntegerType, IntegerType, DecimalType(Decimal.MAX_LONG_DIGITS, 6))
   override def dataType: DataType = CalendarIntervalType
-  override def nullable: Boolean = true
+  override def nullable: Boolean = if (failOnError) children.exists(_.nullable) else true
 
   override def nullSafeEval(
       year: Any,
@@ -237,9 +229,9 @@ case class MakeInterval(
         day.asInstanceOf[Int],
         hour.asInstanceOf[Int],
         min.asInstanceOf[Int],
-        sec.map(_.asInstanceOf[Decimal]).getOrElse(Decimal(0, 8, 6)))
+        sec.map(_.asInstanceOf[Decimal]).getOrElse(Decimal(0, Decimal.MAX_LONG_DIGITS, 6)))
     } catch {
-      case _: ArithmeticException => null
+      case _: ArithmeticException if !failOnError => null
     }
   }
 
@@ -247,11 +239,12 @@ case class MakeInterval(
     nullSafeCodeGen(ctx, ev, (year, month, week, day, hour, min, sec) => {
       val iu = IntervalUtils.getClass.getName.stripSuffix("$")
       val secFrac = sec.getOrElse("0")
+      val failOnErrorBranch = if (failOnError) "throw e;" else s"${ev.isNull} = true;"
       s"""
         try {
           ${ev.value} = $iu.makeInterval($year, $month, $week, $day, $hour, $min, $secFrac);
         } catch (java.lang.ArithmeticException e) {
-          ${ev.isNull} = true;
+          $failOnErrorBranch
         }
       """
     })
@@ -260,68 +253,188 @@ case class MakeInterval(
   override def prettyName: String = "make_interval"
 }
 
-abstract class IntervalJustifyLike(
-    child: Expression,
-    justify: CalendarInterval => CalendarInterval,
-    justifyFuncName: String) extends UnaryExpression with ExpectsInputTypes {
-  override def inputTypes: Seq[AbstractDataType] = Seq(CalendarIntervalType)
+// Multiply an year-month interval by a numeric
+case class MultiplyYMInterval(
+    interval: Expression,
+    num: Expression)
+  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
+  override def left: Expression = interval
+  override def right: Expression = num
 
-  override def dataType: DataType = CalendarIntervalType
+  override def inputTypes: Seq[AbstractDataType] = Seq(YearMonthIntervalType, NumericType)
+  override def dataType: DataType = YearMonthIntervalType
 
-  override def nullSafeEval(input: Any): Any = {
-    try {
-      justify(input.asInstanceOf[CalendarInterval])
-    } catch {
-      case NonFatal(_) => null
-    }
+  @transient
+  private lazy val evalFunc: (Int, Any) => Any = right.dataType match {
+    case ByteType | ShortType | IntegerType => (months: Int, num) =>
+      Math.multiplyExact(months, num.asInstanceOf[Number].intValue())
+    case LongType => (months: Int, num) =>
+      Math.toIntExact(Math.multiplyExact(months, num.asInstanceOf[Long]))
+    case FloatType | DoubleType => (months: Int, num) =>
+      DoubleMath.roundToInt(months * num.asInstanceOf[Number].doubleValue(), RoundingMode.HALF_UP)
+    case _: DecimalType => (months: Int, num) =>
+      val decimalRes = ((new Decimal).set(months) * num.asInstanceOf[Decimal]).toJavaBigDecimal
+      decimalRes.setScale(0, java.math.RoundingMode.HALF_UP).intValueExact()
   }
 
-  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    nullSafeCodeGen(ctx, ev, child => {
-      val iu = IntervalUtils.getClass.getCanonicalName.stripSuffix("$")
-      s"""
-         |try {
-         |  ${ev.value} = $iu.$justifyFuncName($child);
-         |} catch (java.lang.ArithmeticException e) {
-         |  ${ev.isNull} = true;
-         |}
-         |""".stripMargin
-    })
+  override def nullSafeEval(interval: Any, num: Any): Any = {
+    evalFunc(interval.asInstanceOf[Int], num)
   }
 
-  override def prettyName: String = justifyFuncName
+  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = right.dataType match {
+    case ByteType | ShortType | IntegerType =>
+      defineCodeGen(ctx, ev, (m, n) => s"java.lang.Math.multiplyExact($m, $n)")
+    case LongType =>
+      val jlm = classOf[Math].getName
+      defineCodeGen(ctx, ev, (m, n) => s"$jlm.toIntExact($jlm.multiplyExact($m, $n))")
+    case FloatType | DoubleType =>
+      val dm = classOf[DoubleMath].getName
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"$dm.roundToInt($m * (double)$n, java.math.RoundingMode.HALF_UP)")
+    case _: DecimalType =>
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"((new Decimal()).set($m).$$times($n)).toJavaBigDecimal()" +
+        ".setScale(0, java.math.RoundingMode.HALF_UP).intValueExact()")
+  }
+
+  override def toString: String = s"($left * $right)"
 }
 
-@ExpressionDescription(
-  usage = "_FUNC_(expr) - Adjust interval so 30-day time periods are represented as months",
-  examples = """
-    Examples:
-      > SELECT _FUNC_(interval '1 month -59 day 25 hour');
-       -29 days 25 hours
-  """,
-  since = "3.0.0")
-case class JustifyDays(child: Expression)
-  extends IntervalJustifyLike(child, justifyDays, "justifyDays")
+// Multiply a day-time interval by a numeric
+case class MultiplyDTInterval(
+    interval: Expression,
+    num: Expression)
+  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
+  override def left: Expression = interval
+  override def right: Expression = num
 
-@ExpressionDescription(
-  usage = "_FUNC_(expr) - Adjust interval so 24-hour time periods are represented as days",
-  examples = """
-    Examples:
-      > SELECT _FUNC_(interval '1 month -59 day 25 hour');
-       1 months -57 days -23 hours
-  """,
-  since = "3.0.0")
-case class JustifyHours(child: Expression)
-  extends IntervalJustifyLike(child, justifyHours, "justifyHours")
+  override def inputTypes: Seq[AbstractDataType] = Seq(DayTimeIntervalType, NumericType)
+  override def dataType: DataType = DayTimeIntervalType
 
-@ExpressionDescription(
-  usage = "_FUNC_(expr) - Adjust interval using justifyHours and justifyDays, with additional" +
-    " sign adjustments",
-  examples = """
-    Examples:
-      > SELECT _FUNC_(interval '1 month -59 day 25 hour');
-       -27 days -23 hours
-  """,
-  since = "3.0.0")
-case class JustifyInterval(child: Expression)
-  extends IntervalJustifyLike(child, justifyInterval, "justifyInterval")
+  @transient
+  private lazy val evalFunc: (Long, Any) => Any = right.dataType match {
+    case _: IntegralType => (micros: Long, num) =>
+      Math.multiplyExact(micros, num.asInstanceOf[Number].longValue())
+    case _: DecimalType => (micros: Long, num) =>
+      val decimalRes = ((new Decimal).set(micros) * num.asInstanceOf[Decimal]).toJavaBigDecimal
+      decimalRes.setScale(0, RoundingMode.HALF_UP).longValueExact()
+    case _: FractionalType => (micros: Long, num) =>
+      DoubleMath.roundToLong(micros * num.asInstanceOf[Number].doubleValue(), RoundingMode.HALF_UP)
+  }
+
+  override def nullSafeEval(interval: Any, num: Any): Any = {
+    evalFunc(interval.asInstanceOf[Long], num)
+  }
+
+  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = right.dataType match {
+    case _: IntegralType =>
+      defineCodeGen(ctx, ev, (m, n) => s"java.lang.Math.multiplyExact($m, $n)")
+    case _: DecimalType =>
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"((new Decimal()).set($m).$$times($n)).toJavaBigDecimal()" +
+        ".setScale(0, java.math.RoundingMode.HALF_UP).longValueExact()")
+    case _: FractionalType =>
+      val dm = classOf[DoubleMath].getName
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"$dm.roundToLong($m * (double)$n, java.math.RoundingMode.HALF_UP)")
+  }
+
+  override def toString: String = s"($left * $right)"
+}
+
+// Divide an year-month interval by a numeric
+case class DivideYMInterval(
+    interval: Expression,
+    num: Expression)
+  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
+  override def left: Expression = interval
+  override def right: Expression = num
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(YearMonthIntervalType, NumericType)
+  override def dataType: DataType = YearMonthIntervalType
+
+  @transient
+  private lazy val evalFunc: (Int, Any) => Any = right.dataType match {
+    case LongType => (months: Int, num) =>
+      // Year-month interval has `Int` as the internal type. The result of the divide operation
+      // of `Int` by `Long` must fit to `Int`. So, the casting to `Int` cannot cause overflow.
+      LongMath.divide(months, num.asInstanceOf[Long], RoundingMode.HALF_UP).toInt
+    case _: IntegralType => (months: Int, num) =>
+      IntMath.divide(months, num.asInstanceOf[Number].intValue(), RoundingMode.HALF_UP)
+    case _: DecimalType => (months: Int, num) =>
+      val decimalRes = ((new Decimal).set(months) / num.asInstanceOf[Decimal]).toJavaBigDecimal
+      decimalRes.setScale(0, java.math.RoundingMode.HALF_UP).intValueExact()
+    case _: FractionalType => (months: Int, num) =>
+      DoubleMath.roundToInt(months / num.asInstanceOf[Number].doubleValue(), RoundingMode.HALF_UP)
+  }
+
+  override def nullSafeEval(interval: Any, num: Any): Any = {
+    evalFunc(interval.asInstanceOf[Int], num)
+  }
+
+  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = right.dataType match {
+    case LongType =>
+      val math = classOf[LongMath].getName
+      val javaType = CodeGenerator.javaType(dataType)
+      defineCodeGen(ctx, ev, (m, n) =>
+        // Similarly to non-codegen code. The result of `divide(Int, Long, ...)` must fit to `Int`.
+        // Casting to `Int` is safe here.
+        s"($javaType)($math.divide($m, $n, java.math.RoundingMode.HALF_UP))")
+    case _: IntegralType =>
+      val math = classOf[IntMath].getName
+      defineCodeGen(ctx, ev, (m, n) => s"$math.divide($m, $n, java.math.RoundingMode.HALF_UP)")
+    case _: DecimalType =>
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"((new Decimal()).set($m).$$div($n)).toJavaBigDecimal()" +
+        ".setScale(0, java.math.RoundingMode.HALF_UP).intValueExact()")
+    case _: FractionalType =>
+      val math = classOf[DoubleMath].getName
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"$math.roundToInt($m / (double)$n, java.math.RoundingMode.HALF_UP)")
+  }
+
+  override def toString: String = s"($left / $right)"
+}
+
+// Divide a day-time interval by a numeric
+case class DivideDTInterval(
+    interval: Expression,
+    num: Expression)
+  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
+  override def left: Expression = interval
+  override def right: Expression = num
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(DayTimeIntervalType, NumericType)
+  override def dataType: DataType = DayTimeIntervalType
+
+  @transient
+  private lazy val evalFunc: (Long, Any) => Any = right.dataType match {
+    case _: IntegralType => (micros: Long, num) =>
+      LongMath.divide(micros, num.asInstanceOf[Number].longValue(), RoundingMode.HALF_UP)
+    case _: DecimalType => (micros: Long, num) =>
+      val decimalRes = ((new Decimal).set(micros) / num.asInstanceOf[Decimal]).toJavaBigDecimal
+      decimalRes.setScale(0, java.math.RoundingMode.HALF_UP).longValueExact()
+    case _: FractionalType => (micros: Long, num) =>
+      DoubleMath.roundToLong(micros / num.asInstanceOf[Number].doubleValue(), RoundingMode.HALF_UP)
+  }
+
+  override def nullSafeEval(interval: Any, num: Any): Any = {
+    evalFunc(interval.asInstanceOf[Long], num)
+  }
+
+  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = right.dataType match {
+    case _: IntegralType =>
+      val math = classOf[LongMath].getName
+      defineCodeGen(ctx, ev, (m, n) => s"$math.divide($m, $n, java.math.RoundingMode.HALF_UP)")
+    case _: DecimalType =>
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"((new Decimal()).set($m).$$div($n)).toJavaBigDecimal()" +
+        ".setScale(0, java.math.RoundingMode.HALF_UP).longValueExact()")
+    case _: FractionalType =>
+      val math = classOf[DoubleMath].getName
+      defineCodeGen(ctx, ev, (m, n) =>
+        s"$math.roundToLong($m / (double)$n, java.math.RoundingMode.HALF_UP)")
+  }
+
+  override def toString: String = s"($left / $right)"
+}

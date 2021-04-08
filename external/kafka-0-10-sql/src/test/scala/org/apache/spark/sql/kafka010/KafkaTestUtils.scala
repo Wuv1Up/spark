@@ -25,24 +25,25 @@ import java.util.concurrent.TimeUnit
 import javax.security.auth.login.Configuration
 
 import scala.collection.JavaConverters._
-import scala.util.Random
+import scala.io.Source
+import scala.util.control.NonFatal
 
 import com.google.common.io.Files
 import kafka.api.Request
-import kafka.server.{KafkaConfig, KafkaServer}
+import kafka.server.{HostedPartition, KafkaConfig, KafkaServer}
 import kafka.server.checkpoints.OffsetCheckpointFile
-import kafka.utils.ZkUtils
+import kafka.zk.KafkaZkClient
 import org.apache.hadoop.minikdc.MiniKdc
 import org.apache.hadoop.security.UserGroupInformation
 import org.apache.kafka.clients.CommonClientConfigs
-import org.apache.kafka.clients.admin.{AdminClient, CreatePartitionsOptions, ListConsumerGroupsResult, NewPartitions, NewTopic}
-import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.admin._
 import org.apache.kafka.clients.producer._
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.SaslConfigs
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.security.auth.SecurityProtocol.{PLAINTEXT, SASL_PLAINTEXT}
-import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
+import org.apache.kafka.common.serialization.StringSerializer
+import org.apache.kafka.common.utils.SystemTime
 import org.apache.zookeeper.server.{NIOServerCnxnFactory, ZooKeeperServer}
 import org.apache.zookeeper.server.auth.SASLAuthenticationProvider
 import org.scalatest.Assertions._
@@ -52,7 +53,7 @@ import org.scalatest.time.SpanSugar._
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.kafka010.KafkaTokenUtil
-import org.apache.spark.util.{ShutdownHookManager, Utils}
+import org.apache.spark.util.{SecurityUtils, ShutdownHookManager, Utils}
 
 /**
  * This is a helper class for Kafka test suites. This has the functionality to set up
@@ -65,8 +66,6 @@ class KafkaTestUtils(
     secure: Boolean = false) extends Logging {
 
   private val JAVA_AUTH_CONFIG = "java.security.auth.login.config"
-  private val IBM_KRB_DEBUG_CONFIG = "com.ibm.security.krb5.Krb5Debug"
-  private val SUN_KRB_DEBUG_CONFIG = "sun.security.krb5.debug"
 
   private val localCanonicalHostName = InetAddress.getLoopbackAddress().getCanonicalHostName()
   logInfo(s"Local host name is $localCanonicalHostName")
@@ -80,7 +79,7 @@ class KafkaTestUtils(
   private val zkSessionTimeout = 10000
 
   private var zookeeper: EmbeddedZookeeper = _
-  private var zkUtils: ZkUtils = _
+  private var zkClient: KafkaZkClient = _
 
   // Kafka broker related configurations
   private val brokerHost = localCanonicalHostName
@@ -114,9 +113,9 @@ class KafkaTestUtils(
     s"$brokerHost:$brokerPort"
   }
 
-  def zookeeperClient: ZkUtils = {
+  def zookeeperClient: KafkaZkClient = {
     assert(zkReady, "Zookeeper not setup yet or already torn down, cannot get zookeeper client")
-    Option(zkUtils).getOrElse(
+    Option(zkClient).getOrElse(
       throw new IllegalStateException("Zookeeper client is not yet initialized"))
   }
 
@@ -134,9 +133,68 @@ class KafkaTestUtils(
     val kdcDir = Utils.createTempDir()
     val kdcConf = MiniKdc.createConf()
     kdcConf.setProperty(MiniKdc.DEBUG, "true")
-    kdc = new MiniKdc(kdcConf, kdcDir)
-    kdc.start()
+    // The port for MiniKdc service gets selected in the constructor, but will be bound
+    // to it later in MiniKdc.start() -> MiniKdc.initKDCServer() -> KdcServer.start().
+    // In meantime, when some other service might capture the port during this progress, and
+    // cause BindException.
+    // This makes our tests which have dedicated JVMs and rely on MiniKDC being flaky
+    //
+    // https://issues.apache.org/jira/browse/HADOOP-12656 get fixed in Hadoop 2.8.0.
+    //
+    // The workaround here is to periodically repeat this process with a timeout , since we are
+    // using Hadoop 2.7.4 as default.
+    // https://issues.apache.org/jira/browse/SPARK-31631
+    eventually(timeout(60.seconds), interval(1.second)) {
+      try {
+        kdc = new MiniKdc(kdcConf, kdcDir)
+        kdc.start()
+      } catch {
+        case NonFatal(e) =>
+          if (kdc != null) {
+            kdc.stop()
+            kdc = null
+          }
+          throw e
+      }
+    }
+    // TODO https://issues.apache.org/jira/browse/SPARK-30037
+    // Need to build spark's own MiniKDC and customize krb5.conf like Kafka
+    rewriteKrb5Conf()
     kdcReady = true
+  }
+
+  /**
+   * In this method we rewrite krb5.conf to make kdc and client use the same enctypes
+   */
+  private def rewriteKrb5Conf(): Unit = {
+    val krb5Conf = Utils
+      .tryWithResource(Source.fromFile(kdc.getKrb5conf, "UTF-8"))(_.getLines().toList)
+    var rewritten = false
+    val addedConfig =
+      addedKrb5Config("default_tkt_enctypes", "aes128-cts-hmac-sha1-96") +
+        addedKrb5Config("default_tgs_enctypes", "aes128-cts-hmac-sha1-96")
+    val rewriteKrb5Conf = krb5Conf.map(s =>
+      if (s.contains("libdefaults")) {
+        rewritten = true
+        s + addedConfig
+      } else {
+        s
+      }).filter(!_.trim.startsWith("#")).mkString(System.lineSeparator())
+
+    val krb5confStr = if (!rewritten) {
+      "[libdefaults]" + addedConfig + System.lineSeparator() +
+        System.lineSeparator() + rewriteKrb5Conf
+    } else {
+      rewriteKrb5Conf
+    }
+
+    kdc.getKrb5conf.delete()
+    Files.write(krb5confStr, kdc.getKrb5conf, StandardCharsets.UTF_8)
+    logDebug(s"krb5.conf file content: $krb5confStr")
+  }
+
+  private def addedKrb5Config(key: String, value: String): String = {
+    System.lineSeparator() + s"    $key=$value"
   }
 
   private def createKeytabsAndJaasConfigFile(): String = {
@@ -167,25 +225,27 @@ class KafkaTestUtils(
     val content =
       s"""
       |Server {
-      |  ${KafkaTokenUtil.getKrb5LoginModuleName} required
+      |  ${SecurityUtils.getKrb5LoginModuleName()} required
       |  useKeyTab=true
       |  storeKey=true
       |  useTicketCache=false
+      |  refreshKrb5Config=true
       |  keyTab="${zkServerKeytabFile.getAbsolutePath()}"
       |  principal="$zkServerUser@$realm";
       |};
       |
       |Client {
-      |  ${KafkaTokenUtil.getKrb5LoginModuleName} required
+      |  ${SecurityUtils.getKrb5LoginModuleName()} required
       |  useKeyTab=true
       |  storeKey=true
       |  useTicketCache=false
+      |  refreshKrb5Config=true
       |  keyTab="${zkClientKeytabFile.getAbsolutePath()}"
       |  principal="$zkClientUser@$realm";
       |};
       |
       |KafkaServer {
-      |  ${KafkaTokenUtil.getKrb5LoginModuleName} required
+      |  ${SecurityUtils.getKrb5LoginModuleName()} required
       |  serviceName="$brokerServiceName"
       |  useKeyTab=true
       |  storeKey=true
@@ -205,7 +265,8 @@ class KafkaTestUtils(
     zookeeper = new EmbeddedZookeeper(s"$zkHost:$zkPort")
     // Get the actual zookeeper binding port
     zkPort = zookeeper.actualPort
-    zkUtils = ZkUtils(s"$zkHost:$zkPort", zkSessionTimeout, zkConnectionTimeout, false)
+    zkClient = KafkaZkClient(s"$zkHost:$zkPort", isSecure = false, zkSessionTimeout,
+      zkConnectionTimeout, 1, new SystemTime())
     zkReady = true
   }
 
@@ -239,7 +300,7 @@ class KafkaTestUtils(
     }
 
     if (secure) {
-      setupKrbDebug()
+      SecurityUtils.setGlobalKrbDebug(true)
       setUpMiniKdc()
       val jaasConfigFile = createKeytabsAndJaasConfigFile()
       System.setProperty(JAVA_AUTH_CONFIG, jaasConfigFile)
@@ -250,15 +311,7 @@ class KafkaTestUtils(
     setupEmbeddedZookeeper()
     setupEmbeddedKafkaServer()
     eventually(timeout(1.minute)) {
-      assert(zkUtils.getAllBrokersInCluster().nonEmpty, "Broker was not up in 60 seconds")
-    }
-  }
-
-  private def setupKrbDebug(): Unit = {
-    if (System.getProperty("java.vendor").contains("IBM")) {
-      System.setProperty(IBM_KRB_DEBUG_CONFIG, "all")
-    } else {
-      System.setProperty(SUN_KRB_DEBUG_CONFIG, "true")
+      assert(zkClient.getAllBrokersInCluster.nonEmpty, "Broker was not up in 60 seconds")
     }
   }
 
@@ -269,6 +322,7 @@ class KafkaTestUtils(
     }
     brokerReady = false
     zkReady = false
+    kdcReady = false
 
     if (producer != null) {
       producer.close()
@@ -277,6 +331,7 @@ class KafkaTestUtils(
 
     if (adminClient != null) {
       adminClient.close()
+      adminClient = null
     }
 
     if (server != null) {
@@ -297,9 +352,9 @@ class KafkaTestUtils(
       }
     }
 
-    if (zkUtils != null) {
-      zkUtils.close()
-      zkUtils = null
+    if (zkClient != null) {
+      zkClient.close()
+      zkClient = null
     }
 
     if (zookeeper != null) {
@@ -311,17 +366,10 @@ class KafkaTestUtils(
     Configuration.getConfiguration.refresh()
     if (kdc != null) {
       kdc.stop()
+      kdc = null
     }
     UserGroupInformation.reset()
-    teardownKrbDebug()
-  }
-
-  private def teardownKrbDebug(): Unit = {
-    if (System.getProperty("java.vendor").contains("IBM")) {
-      System.clearProperty(IBM_KRB_DEBUG_CONFIG)
-    } else {
-      System.clearProperty(SUN_KRB_DEBUG_CONFIG)
-    }
+    SecurityUtils.setGlobalKrbDebug(false)
   }
 
   /** Create a Kafka topic and wait until it is propagated to the whole cluster */
@@ -329,7 +377,7 @@ class KafkaTestUtils(
     var created = false
     while (!created) {
       try {
-        val newTopic = new NewTopic(topic, partitions, 1)
+        val newTopic = new NewTopic(topic, partitions, 1.shortValue())
         adminClient.createTopics(Collections.singleton(newTopic))
         created = true
       } catch {
@@ -346,7 +394,7 @@ class KafkaTestUtils(
   }
 
   def getAllTopicsAndPartitionSize(): Seq[(String, Int)] = {
-    zkUtils.getPartitionsForTopics(zkUtils.getAllTopics()).mapValues(_.size).toSeq
+    zkClient.getPartitionsForTopics(zkClient.getAllTopicsInCluster()).mapValues(_.size).toSeq
   }
 
   /** Create a Kafka topic and wait until it is propagated to the whole cluster */
@@ -356,9 +404,9 @@ class KafkaTestUtils(
 
   /** Delete a Kafka topic and wait until it is propagated to the whole cluster */
   def deleteTopic(topic: String): Unit = {
-    val partitions = zkUtils.getPartitionsForTopics(Seq(topic))(topic).size
+    val partitions = zkClient.getPartitionsForTopics(Set(topic))(topic).size
     adminClient.deleteTopics(Collections.singleton(topic))
-    verifyTopicDeletionWithRetries(zkUtils, topic, partitions, List(this.server))
+    verifyTopicDeletionWithRetries(topic, partitions, List(this.server))
   }
 
   /** Add new partitions to a Kafka topic */
@@ -413,32 +461,24 @@ class KafkaTestUtils(
     server.logManager.cleanupLogs()
   }
 
+  private def getOffsets(topics: Set[String], offsetSpec: OffsetSpec): Map[TopicPartition, Long] = {
+    val listOffsetsParams = adminClient.describeTopics(topics.asJava).all().get().asScala
+      .flatMap { topicDescription =>
+        topicDescription._2.partitions().asScala.map { topicPartitionInfo =>
+          new TopicPartition(topicDescription._1, topicPartitionInfo.partition())
+        }
+      }.map(_ -> offsetSpec).toMap.asJava
+    val partitionOffsets = adminClient.listOffsets(listOffsetsParams).all().get().asScala
+      .map(result => result._1 -> result._2.offset()).toMap
+    partitionOffsets
+  }
+
   def getEarliestOffsets(topics: Set[String]): Map[TopicPartition, Long] = {
-    val kc = new KafkaConsumer[String, String](consumerConfiguration)
-    logInfo("Created consumer to get earliest offsets")
-    kc.subscribe(topics.asJavaCollection)
-    kc.poll(0)
-    val partitions = kc.assignment()
-    kc.pause(partitions)
-    kc.seekToBeginning(partitions)
-    val offsets = partitions.asScala.map(p => p -> kc.position(p)).toMap
-    kc.close()
-    logInfo("Closed consumer to get earliest offsets")
-    offsets
+    getOffsets(topics, OffsetSpec.earliest())
   }
 
   def getLatestOffsets(topics: Set[String]): Map[TopicPartition, Long] = {
-    val kc = new KafkaConsumer[String, String](consumerConfiguration)
-    logInfo("Created consumer to get latest offsets")
-    kc.subscribe(topics.asJavaCollection)
-    kc.poll(0)
-    val partitions = kc.assignment()
-    kc.pause(partitions)
-    kc.seekToEnd(partitions)
-    val offsets = partitions.asScala.map(p => p -> kc.position(p)).toMap
-    kc.close()
-    logInfo("Closed consumer to get latest offsets")
-    offsets
+    getOffsets(topics, OffsetSpec.latest())
   }
 
   def listConsumerGroups(): ListConsumerGroupsResult = {
@@ -498,7 +538,7 @@ class KafkaTestUtils(
   }
 
   /** Call `f` with a `KafkaProducer` that has initialized transactions. */
-  def withTranscationalProducer(f: KafkaProducer[String, String] => Unit): Unit = {
+  def withTransactionalProducer(f: KafkaProducer[String, String] => Unit): Unit = {
     val props = producerConfiguration
     props.put("transactional.id", UUID.randomUUID().toString)
     val producer = new KafkaProducer[String, String](props)
@@ -508,17 +548,6 @@ class KafkaTestUtils(
     } finally {
       producer.close()
     }
-  }
-
-  private def consumerConfiguration: Properties = {
-    val props = new Properties()
-    props.put("bootstrap.servers", brokerAddress)
-    props.put("group.id", "group-KafkaTestUtils-" + Random.nextInt)
-    props.put("value.deserializer", classOf[StringDeserializer].getName)
-    props.put("key.deserializer", classOf[StringDeserializer].getName)
-    props.put("enable.auto.commit", "false")
-    setAuthenticationConfigIfNeeded(props)
-    props
   }
 
   private def setAuthenticationConfigIfNeeded(props: Properties): Unit = {
@@ -537,20 +566,17 @@ class KafkaTestUtils(
       servers: Seq[KafkaServer]): Unit = {
     val topicAndPartitions = (0 until numPartitions).map(new TopicPartition(topic, _))
 
-    import ZkUtils._
     // wait until admin path for delete topic is deleted, signaling completion of topic deletion
-    assert(
-      !zkUtils.pathExists(getDeleteTopicPath(topic)),
-      s"${getDeleteTopicPath(topic)} still exists")
-    assert(!zkUtils.pathExists(getTopicPath(topic)), s"${getTopicPath(topic)} still exists")
+    assert(!zkClient.isTopicMarkedForDeletion(topic), "topic is still marked for deletion")
+    assert(!zkClient.topicExists(topic), "topic still exists")
     // ensure that the topic-partition has been deleted from all brokers' replica managers
     assert(servers.forall(server => topicAndPartitions.forall(tp =>
-      server.replicaManager.getPartition(tp) == None)),
+      server.replicaManager.getPartition(tp) == HostedPartition.None)),
       s"topic $topic still exists in the replica manager")
     // ensure that logs from all replicas are deleted if delete topic is marked successful
     assert(servers.forall(server => topicAndPartitions.forall(tp =>
       server.getLogManager().getLog(tp).isEmpty)),
-      s"topic $topic still exists in log mananger")
+      s"topic $topic still exists in log manager")
     // ensure that topic is removed from all cleaner offsets
     assert(servers.forall(server => topicAndPartitions.forall { tp =>
       val checkpoints = server.getLogManager().liveLogDirs.map { logDir =>
@@ -560,13 +586,12 @@ class KafkaTestUtils(
     }), s"checkpoint for topic $topic still exists")
     // ensure the topic is gone
     assert(
-      !zkUtils.getAllTopics().contains(topic),
+      !zkClient.getAllTopicsInCluster().contains(topic),
       s"topic $topic still exists on zookeeper")
   }
 
   /** Verify topic is deleted. Retry to delete the topic if not. */
   private def verifyTopicDeletionWithRetries(
-      zkUtils: ZkUtils,
       topic: String,
       numPartitions: Int,
       servers: Seq[KafkaServer]): Unit = {
@@ -588,9 +613,9 @@ class KafkaTestUtils(
     def isPropagated = server.dataPlaneRequestProcessor.metadataCache
         .getPartitionInfo(topic, partition) match {
       case Some(partitionState) =>
-        zkUtils.getLeaderForPartition(topic, partition).isDefined &&
-          Request.isValidBrokerId(partitionState.basePartitionState.leader) &&
-          !partitionState.basePartitionState.replicas.isEmpty
+        zkClient.getLeaderForPartition(new TopicPartition(topic, partition)).isDefined &&
+          Request.isValidBrokerId(partitionState.leader) &&
+          !partitionState.replicas.isEmpty
 
       case _ =>
         false

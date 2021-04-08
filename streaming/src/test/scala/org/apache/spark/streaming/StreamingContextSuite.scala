@@ -18,6 +18,7 @@
 package org.apache.spark.streaming
 
 import java.io.{File, NotSerializableException}
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
@@ -909,7 +910,7 @@ class StreamingContextSuite
   def createCorruptedCheckpoint(): String = {
     val checkpointDirectory = Utils.createTempDir().getAbsolutePath()
     val fakeCheckpointFile = Checkpoint.checkpointFile(checkpointDirectory, Time(1000))
-    FileUtils.write(new File(fakeCheckpointFile.toString()), "blablabla")
+    FileUtils.write(new File(fakeCheckpointFile.toString()), "blablabla", StandardCharsets.UTF_8)
     assert(Checkpoint.getCheckpointFiles(checkpointDirectory).nonEmpty)
     checkpointDirectory
   }
@@ -984,7 +985,7 @@ object SlowTestReceiver {
 }
 
 /** Streaming application for testing DStream and RDD creation sites */
-package object testPackage extends Assertions {
+object testPackage extends Assertions {
   def test(): Unit = {
     val conf = new SparkConf().setMaster("local").setAppName("CreationSite test")
     val ssc = new StreamingContext(conf, Milliseconds(100))

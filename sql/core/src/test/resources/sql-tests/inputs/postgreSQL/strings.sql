@@ -270,55 +270,54 @@ SELECT 'indio' NOT LIKE 'in__o' AS `false`;
 SELECT 'indio' LIKE 'in_o' AS `false`;
 SELECT 'indio' NOT LIKE 'in_o' AS `true`;
 
--- [SPARK-28083] ANSI SQL: LIKE predicate: ESCAPE clause
 -- unused escape character
--- SELECT 'hawkeye' LIKE 'h%' ESCAPE '#' AS "true";
--- SELECT 'hawkeye' NOT LIKE 'h%' ESCAPE '#' AS "false";
+SELECT 'hawkeye' LIKE 'h%' ESCAPE '#' AS `true`;
+SELECT 'hawkeye' NOT LIKE 'h%' ESCAPE '#' AS `false`;
 
--- SELECT 'indio' LIKE 'ind_o' ESCAPE '$' AS "true";
--- SELECT 'indio' NOT LIKE 'ind_o' ESCAPE '$' AS "false";
+SELECT 'indio' LIKE 'ind_o' ESCAPE '$' AS `true`;
+SELECT 'indio' NOT LIKE 'ind_o' ESCAPE '$' AS `false`;
 
 -- escape character
 -- E061-05 like predicate with escape clause
--- SELECT 'h%' LIKE 'h#%' ESCAPE '#' AS "true";
--- SELECT 'h%' NOT LIKE 'h#%' ESCAPE '#' AS "false";
+SELECT 'h%' LIKE 'h#%' ESCAPE '#' AS `true`;
+SELECT 'h%' NOT LIKE 'h#%' ESCAPE '#' AS `false`;
 
--- SELECT 'h%wkeye' LIKE 'h#%' ESCAPE '#' AS "false";
--- SELECT 'h%wkeye' NOT LIKE 'h#%' ESCAPE '#' AS "true";
+SELECT 'h%wkeye' LIKE 'h#%' ESCAPE '#' AS `false`;
+SELECT 'h%wkeye' NOT LIKE 'h#%' ESCAPE '#' AS `true`;
 
--- SELECT 'h%wkeye' LIKE 'h#%%' ESCAPE '#' AS "true";
--- SELECT 'h%wkeye' NOT LIKE 'h#%%' ESCAPE '#' AS "false";
+SELECT 'h%wkeye' LIKE 'h#%%' ESCAPE '#' AS `true`;
+SELECT 'h%wkeye' NOT LIKE 'h#%%' ESCAPE '#' AS `false`;
 
--- SELECT 'h%awkeye' LIKE 'h#%a%k%e' ESCAPE '#' AS "true";
--- SELECT 'h%awkeye' NOT LIKE 'h#%a%k%e' ESCAPE '#' AS "false";
+SELECT 'h%awkeye' LIKE 'h#%a%k%e' ESCAPE '#' AS `true`;
+SELECT 'h%awkeye' NOT LIKE 'h#%a%k%e' ESCAPE '#' AS `false`;
 
--- SELECT 'indio' LIKE '_ndio' ESCAPE '$' AS "true";
--- SELECT 'indio' NOT LIKE '_ndio' ESCAPE '$' AS "false";
+SELECT 'indio' LIKE '_ndio' ESCAPE '$' AS `true`;
+SELECT 'indio' NOT LIKE '_ndio' ESCAPE '$' AS `false`;
 
--- SELECT 'i_dio' LIKE 'i$_d_o' ESCAPE '$' AS "true";
--- SELECT 'i_dio' NOT LIKE 'i$_d_o' ESCAPE '$' AS "false";
+SELECT 'i_dio' LIKE 'i$_d_o' ESCAPE '$' AS `true`;
+SELECT 'i_dio' NOT LIKE 'i$_d_o' ESCAPE '$' AS `false`;
 
--- SELECT 'i_dio' LIKE 'i$_nd_o' ESCAPE '$' AS "false";
--- SELECT 'i_dio' NOT LIKE 'i$_nd_o' ESCAPE '$' AS "true";
+SELECT 'i_dio' LIKE 'i$_nd_o' ESCAPE '$' AS `false`;
+SELECT 'i_dio' NOT LIKE 'i$_nd_o' ESCAPE '$' AS `true`;
 
--- SELECT 'i_dio' LIKE 'i$_d%o' ESCAPE '$' AS "true";
--- SELECT 'i_dio' NOT LIKE 'i$_d%o' ESCAPE '$' AS "false";
+SELECT 'i_dio' LIKE 'i$_d%o' ESCAPE '$' AS `true`;
+SELECT 'i_dio' NOT LIKE 'i$_d%o' ESCAPE '$' AS `false`;
 
 -- escape character same as pattern character
--- SELECT 'maca' LIKE 'm%aca' ESCAPE '%' AS "true";
--- SELECT 'maca' NOT LIKE 'm%aca' ESCAPE '%' AS "false";
+SELECT 'maca' LIKE 'm%aca' ESCAPE '%' AS `true`;
+SELECT 'maca' NOT LIKE 'm%aca' ESCAPE '%' AS `false`;
 
--- SELECT 'ma%a' LIKE 'm%a%%a' ESCAPE '%' AS "true";
--- SELECT 'ma%a' NOT LIKE 'm%a%%a' ESCAPE '%' AS "false";
+SELECT 'ma%a' LIKE 'm%a%%a' ESCAPE '%' AS `true`;
+SELECT 'ma%a' NOT LIKE 'm%a%%a' ESCAPE '%' AS `false`;
 
--- SELECT 'bear' LIKE 'b_ear' ESCAPE '_' AS "true";
--- SELECT 'bear' NOT LIKE 'b_ear' ESCAPE '_' AS "false";
+SELECT 'bear' LIKE 'b_ear' ESCAPE '_' AS `true`;
+SELECT 'bear' NOT LIKE 'b_ear' ESCAPE '_' AS `false`;
 
--- SELECT 'be_r' LIKE 'b_e__r' ESCAPE '_' AS "true";
--- SELECT 'be_r' NOT LIKE 'b_e__r' ESCAPE '_' AS "false";
+SELECT 'be_r' LIKE 'b_e__r' ESCAPE '_' AS `true`;
+SELECT 'be_r' NOT LIKE 'b_e__r' ESCAPE '_' AS `false`;
 
--- SELECT 'be_r' LIKE '__e__r' ESCAPE '_' AS "false";
--- SELECT 'be_r' NOT LIKE '__e__r' ESCAPE '_' AS "true";
+SELECT 'be_r' LIKE '__e__r' ESCAPE '_' AS `false`;
+SELECT 'be_r' NOT LIKE '__e__r' ESCAPE '_' AS `true`;
 
 -- [SPARK-28448] Implement ILIKE operator
 --
@@ -631,7 +630,8 @@ SELECT rpad('hi', -5, 'xy');
 SELECT rpad('hello', 2);
 SELECT rpad('hi', 5, '');
 
-SELECT ltrim('zzzytrim', 'xyz');
+-- skip this test because PostgreSQL has different parameter order compares to SparkSQL
+-- SELECT ltrim('zzzytrim', 'xyz');
 
 SELECT translate('', '14', 'ax');
 SELECT translate('12345', '14', 'ax');
@@ -647,10 +647,9 @@ SELECT repeat('Pg', 4);
 SELECT repeat('Pg', -4);
 
 SELECT trim(binary('\\000') from binary('\\000Tom\\000'));
--- [SPARK-28123] Add support btrim
--- SELECT btrim(E'\\000trim\\000'::bytea, E'\\000'::bytea);
--- SELECT btrim(''::bytea, E'\\000'::bytea);
--- SELECT btrim(E'\\000trim\\000'::bytea, ''::bytea);
+SELECT btrim(binary('\\000trim\\000'), binary('\\000'));
+SELECT btrim(binary(''), binary('\\000'));
+SELECT btrim(binary('\\000trim\\000'), binary(''));
 -- [SPARK-28121] decode can not accept 'escape' as charset
 -- [SPARK-28412][SQL] ANSI SQL: OVERLAY function support byte array
 -- SELECT encode(overlay(E'Th\\000omas'::bytea placing E'Th\\001omas'::bytea from 2),'escape');

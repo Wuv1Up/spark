@@ -1,6 +1,6 @@
 -- SPARK-23179: SQL ANSI 2011 states that in case of overflow during arithmetic operations,
 -- an exception should be thrown instead of returning NULL.
--- This is what most of the SQL DBs do (eg. SQLServer, DB2).
+-- This is what most of the SQL DBs do (e.g. SQLServer, DB2).
 
 -- tests for decimals handling in operations
 create table decimals_test(id int, a decimal(38,18), b decimal(38,18)) using parquet;
@@ -19,10 +19,10 @@ select 10.300000000000000000 * 3.000000000000000000;
 select 10.300000000000000000 * 3.0000000000000000000;
 
 -- arithmetic operations causing an overflow throw exception
-select (5e36 + 0.1) + 5e36;
-select (-4e36 - 0.1) - 7e36;
+select (5e36BD + 0.1) + 5e36BD;
+select (-4e36BD - 0.1) - 7e36BD;
 select 12345678901234567890.0 * 12345678901234567890.0;
-select 1e35 / 0.1;
+select 1e35BD / 0.1;
 
 -- arithmetic operations causing a precision loss throw exception
 select 123456789123456789.1234567890 * 1.123456789123456789;

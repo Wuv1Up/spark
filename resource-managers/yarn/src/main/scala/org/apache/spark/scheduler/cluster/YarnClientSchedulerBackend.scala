@@ -17,6 +17,8 @@
 
 package org.apache.spark.scheduler.cluster
 
+import java.io.InterruptedIOException
+
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.hadoop.yarn.api.records.YarnApplicationState
@@ -121,7 +123,8 @@ private[spark] class YarnClientSchedulerBackend(
         allowInterrupt = false
         sc.stop()
       } catch {
-        case e: InterruptedException => logInfo("Interrupting monitor thread")
+        case _: InterruptedException | _: InterruptedIOException =>
+          logInfo("Interrupting monitor thread")
       }
     }
 
@@ -164,7 +167,7 @@ private[spark] class YarnClientSchedulerBackend(
 
     super.stop()
     client.stop()
-    logInfo("Stopped")
+    logInfo("YARN client scheduler backend Stopped")
   }
 
   override protected def updateDelegationTokens(tokens: Array[Byte]): Unit = {
